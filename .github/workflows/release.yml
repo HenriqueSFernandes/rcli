@@ -1,0 +1,36 @@
+name: release
+
+# Tag pushes start a release. tag-release.yml dispatches this explicitly,
+# because a tag pushed with GITHUB_TOKEN does not raise a push event.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # create the GitHub Release + upload assets
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # goreleaser builds the changelog from full history
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2 # required by cargo-zigbuild for cross-targets
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

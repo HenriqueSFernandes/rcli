@@ -1,0 +1,81 @@
+name: cut release
+
+# Manual entry point for a release: pick the bump, get a release PR.
+# Pushes only to an unprotected release/* branch, so no ruleset bypass is needed.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Which part of the version to bump"
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write # push the release/* branch
+  pull-requests: write # open the release PR
+
+jobs:
+  cut:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout develop
+        uses: actions/checkout@v7
+        with:
+          ref: develop
+          fetch-depth: 0 # need origin/main and all tags
+
+      - name: Compute next version
+        id: ver
+        run: |
+          set -euo pipefail
+          # Source of truth is main's version: re-running this workflow always
+          # computes the same target, so versions never ratchet.
+          current=$(git show origin/main:Cargo.toml | awk -F'"' '/^version = /{print $2; exit}')
+          IFS=. read -r major minor patch <<<"$current"
+          case "${{ inputs.bump }}" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          next="${major}.${minor}.${patch}"
+          if git rev-parse -q --verify "refs/tags/v${next}" >/dev/null; then
+            echo "::error::tag v${next} already exists — released already?"
+            exit 1
+          fi
+          echo "current=${current}" >> "$GITHUB_OUTPUT"
+          echo "next=${next}" >> "$GITHUB_OUTPUT"
+
+      - name: Bump Cargo.toml and Cargo.lock
+        run: |
+          set -euo pipefail
+          next="${{ steps.ver.outputs.next }}"
+          sed -i -E "0,/^version = \".*\"/s//version = \"${next}\"/" Cargo.toml
+          cargo check --quiet # rewrites the version recorded in Cargo.lock
+          grep -q "^version = \"${next}\"" Cargo.toml
+
+      - name: Push release branch and open PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          current="${{ steps.ver.outputs.current }}"
+          next="${{ steps.ver.outputs.next }}"
+          branch="release/v${next}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "${branch}"
+          git commit -am "release: v${next}"
+          git push origin "${branch}"
+          body=$(cat <<EOF
+          Version bump \`${current}\` → \`${next}\` (${{ inputs.bump }}).
+
+          Merging this PR creates tag \`v${next}\` on the merge commit — after the
+          \`release\` environment approval — which runs GoReleaser and publishes the release.
+          EOF
+          )
+          gh pr create --base main --head "${branch}" --title "release: v${next}" --body "${body}"
