@@ -43,6 +43,14 @@ impl Rng {
     fn pick<'a>(&mut self, items: &'a [String]) -> &'a str {
         &items[self.range(0, items.len() as u64 - 1) as usize]
     }
+
+    /// Fisher-Yates, in place.
+    fn shuffle<T>(&mut self, items: &mut [T]) {
+        for i in (1..items.len()).rev() {
+            let j = self.range(0, i as u64) as usize;
+            items.swap(i, j);
+        }
+    }
 }
 
 const USAGE: &str = "\
@@ -55,6 +63,7 @@ COMMANDS:
     roll <NdM>...        Roll dice (e.g. `roll 2d6 1d20`)
     flip [N]             Flip N coins (default 1), prints results
     pick <ITEM>...       Pick one item from the given list
+    shuffle <ITEM>...    Shuffle the given items into a random order
     number [LO] [HI]     Random integer in [LO, HI] (default 1..100)
     password [LEN]       Random alphanumeric password (default 16)
 
@@ -121,6 +130,16 @@ fn cmd_pick(rng: &mut Rng, items: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_shuffle(rng: &mut Rng, args: &[String]) -> Result<(), String> {
+    if args.len() < 2 {
+        return Err("shuffle needs at least two items, e.g. `shuffle alice bob carol`".into());
+    }
+    let mut items: Vec<&str> = args.iter().map(String::as_str).collect();
+    rng.shuffle(&mut items);
+    println!("{}", items.join(" "));
+    Ok(())
+}
+
 fn cmd_number(rng: &mut Rng, args: &[String]) -> Result<(), String> {
     let (lo, hi) = match args.len() {
         0 => (1, 100),
@@ -160,6 +179,7 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("roll") => cmd_roll(&mut rng, &args[1..]),
         Some("flip") => cmd_flip(&mut rng, &args[1..]),
         Some("pick") => cmd_pick(&mut rng, &args[1..]),
+        Some("shuffle") => cmd_shuffle(&mut rng, &args[1..]),
         Some("number") => cmd_number(&mut rng, &args[1..]),
         Some("password") => cmd_password(&mut rng, &args[1..]),
         Some("-h" | "--help") | None => {
@@ -212,7 +232,20 @@ mod tests {
         assert!(run(&["bogus".into()]).is_err());
         assert!(run(&["roll".into()]).is_err());
         assert!(run(&["pick".into()]).is_err());
+        assert!(run(&["shuffle".into()]).is_err());
+        assert!(run(&["shuffle".into(), "only-one".into()]).is_err());
         assert!(run(&["number".into(), "9".into(), "1".into()]).is_err());
         assert!(run(&["number".into(), "1".into(), "6".into()]).is_ok());
+    }
+
+    #[test]
+    fn shuffle_permutes_without_losing_items() {
+        let mut rng = Rng(7);
+        let mut items: Vec<u32> = (0..64).collect();
+        rng.shuffle(&mut items);
+        let mut sorted = items.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..64).collect::<Vec<u32>>(), "items were lost or duplicated");
+        assert_ne!(items, sorted, "64 items should not land back in order");
     }
 }

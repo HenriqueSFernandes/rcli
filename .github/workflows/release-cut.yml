@@ -68,9 +68,10 @@ jobs:
           branch="release/v${next}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "${branch}"
+          git switch -C "${branch}"
           git commit -am "release: v${next}"
-          git push origin "${branch}"
+          # -C plus force-with-lease makes re-runs safe after a partial failure
+          git push --force-with-lease origin "${branch}"
           body=$(cat <<EOF
           Version bump \`${current}\` → \`${next}\` (${{ inputs.bump }}).
 
@@ -78,4 +79,8 @@ jobs:
           \`release\` environment approval — which runs GoReleaser and publishes the release.
           EOF
           )
-          gh pr create --base main --head "${branch}" --title "release: v${next}" --body "${body}"
+          if pr=$(gh pr list --head "${branch}" --base main --state open --json number --jq '.[0].number // empty') && [ -n "${pr}" ]; then
+            echo "PR #${pr} already open for ${branch}"
+          else
+            gh pr create --base main --head "${branch}" --title "release: v${next}" --body "${body}"
+          fi
