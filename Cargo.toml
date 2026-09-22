@@ -1,0 +1,12 @@
+[package]
+name = "rcli"
+version = "0.1.0"
+edition = "2024"
+description = "Random things, on the command line — dice, coins, picks, numbers, passwords"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+
+[[bin]]
+name = "rcli"
+path = "src/main.rs"
