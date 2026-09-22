@@ -1,36 +1,135 @@
 name: release
 
-# Tag pushes start a release. tag-release.yml dispatches this explicitly,
-# because a tag pushed with GITHUB_TOKEN does not raise a push event.
 on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to build and publish, e.g. v0.2.2"
+        required: true
+        type: string
+  workflow_dispatch: {}
 
 permissions:
-  contents: write # create the GitHub Release + upload assets
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  goreleaser:
+  resolve:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      label: ${{ steps.resolve.outputs.label }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - id: resolve
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          if [ -z "${tag}" ] && [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          fi
+          # Empty tag => manual smoke test: build everything, publish nothing.
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "label=${tag:-dev}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel # macos-13 was retired on 2025-12-04
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v5
         with:
-          fetch-depth: 0 # goreleaser builds the changelog from full history
+          ref: ${{ needs.resolve.outputs.tag || github.ref }}
+          fetch-depth: 1
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add ${{ matrix.target }}
 
-      - name: Set up Zig
-        uses: mlugg/setup-zig@v2 # required by cargo-zigbuild for cross-targets
+      - name: Build rcli
+        run: cargo build --release --locked --bin rcli --target ${{ matrix.target }}
 
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v7
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          staging="rcli-${{ needs.resolve.outputs.label }}-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/rcli" "$staging/"
+          strip "$staging/rcli" || true
+          tar -czf "${staging}.tar.gz" "$staging"
+          shasum -a 256 "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $staging = "rcli-${{ needs.resolve.outputs.label }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/rcli.exe" $staging
+          Compress-Archive -Path $staging -DestinationPath "$staging.zip"
+          $hash = (Get-FileHash "$staging.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $staging.zip" | Out-File "$staging.zip.sha256" -Encoding ascii
+
+      - uses: actions/upload-artifact@v4
         with:
-          distribution: goreleaser
-          version: "~> v2"
-          args: release --clean
+          name: rcli-${{ matrix.target }}
+          path: |
+            rcli-*.tar.gz
+            rcli-*.zip
+            rcli-*.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Assemble checksum file
+        run: |
+          set -euo pipefail
+          cd artifacts
+          cat *.sha256 > SHA256SUMS
+          rm -f *.sha256
+          ls -l
+
+      - name: Create GitHub release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ needs.resolve.outputs.tag }}" \
+            --title "${{ needs.resolve.outputs.tag }}" \
+            --generate-notes \
+            artifacts/*

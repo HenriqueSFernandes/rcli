@@ -1,38 +1,35 @@
 name: tag release
 
-# Merging a release/* PR into main is the release trigger.
 on:
   pull_request:
     types: [closed]
     branches: [main]
 
 permissions:
-  contents: write # create the tag
-  actions: write # dispatch the goreleaser workflow
-  pull-requests: write # open the follow-up sync PR
+  contents: write
+  pull-requests: write
 
 jobs:
   tag:
     if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/')
     runs-on: ubuntu-latest
-    # Human approval gate: nothing is tagged until a reviewer approves this run.
-    # Tags are immutable by ruleset, so this is the last chance to abort.
-    environment: release
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
-      - name: Checkout merge commit
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
 
       - name: Resolve version
         id: ver
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }} # untrusted: keep out of the script body
         run: |
           set -euo pipefail
           version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
-          head_ref="${{ github.event.pull_request.head.ref }}"
-          if [ "release/v${version}" != "${head_ref}" ]; then
-            echo "::error::Cargo.toml says ${version} but PR branch is ${head_ref}"
+          if [ "release/v${version}" != "${HEAD_REF}" ]; then
+            echo "::error::Cargo.toml says ${version} but PR branch is ${HEAD_REF}"
             exit 1
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
@@ -46,13 +43,6 @@ jobs:
           git tag -a "${tag}" -m "${tag}"
           git push origin "${tag}"
 
-      - name: Trigger the release build
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # A tag pushed with GITHUB_TOKEN does not start another workflow,
-        # so dispatch it explicitly against the new tag.
-        run: gh workflow run release.yml --ref "v${{ steps.ver.outputs.version }}"
-
       - name: Sync the bump back to develop
         continue-on-error: true # no-op when develop already matches
         env:
@@ -61,3 +51,11 @@ jobs:
           gh pr create --base develop --head main \
             --title "chore: sync v${{ steps.ver.outputs.version }} to develop" \
             --body "Brings the released version bump back into develop."
+
+  release:
+    needs: tag
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: v${{ needs.tag.outputs.version }}
+    permissions:
+      contents: write

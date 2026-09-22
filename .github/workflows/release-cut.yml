@@ -1,7 +1,5 @@
 name: cut release
 
-# Manual entry point for a release: pick the bump, get a release PR.
-# Pushes only to an unprotected release/* branch, so no ruleset bypass is needed.
 on:
   workflow_dispatch:
     inputs:
@@ -16,25 +14,22 @@ on:
           - major
 
 permissions:
-  contents: write # push the release/* branch
-  pull-requests: write # open the release PR
+  contents: write
+  pull-requests: write
 
 jobs:
   cut:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout develop
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v5
         with:
           ref: develop
-          fetch-depth: 0 # need origin/main and all tags
+          fetch-depth: 0
 
       - name: Compute next version
         id: ver
         run: |
           set -euo pipefail
-          # Source of truth is main's version: re-running this workflow always
-          # computes the same target, so versions never ratchet.
           current=$(git show origin/main:Cargo.toml | awk -F'"' '/^version = /{print $2; exit}')
           IFS=. read -r major minor patch <<<"$current"
           case "${{ inputs.bump }}" in
@@ -50,13 +45,19 @@ jobs:
           echo "current=${current}" >> "$GITHUB_OUTPUT"
           echo "next=${next}" >> "$GITHUB_OUTPUT"
 
-      - name: Bump Cargo.toml and Cargo.lock
+      - name: Bump manifest and lockfile
         run: |
           set -euo pipefail
           next="${{ steps.ver.outputs.next }}"
           sed -i -E "0,/^version = \".*\"/s//version = \"${next}\"/" Cargo.toml
-          cargo check --quiet # rewrites the version recorded in Cargo.lock
+          awk -v v="${next}" '
+            /^name = "rcli"$/ { incf = 1 }
+            incf && /^version = / && !done { sub(/"[^"]*"/, "\"" v "\""); done = 1; incf = 0 }
+            { print }
+          ' Cargo.lock > Cargo.lock.new
+          mv Cargo.lock.new Cargo.lock
           grep -q "^version = \"${next}\"" Cargo.toml
+          grep -A1 '^name = "rcli"$' Cargo.lock | grep -q "^version = \"${next}\""
 
       - name: Push release branch and open PR
         env:
@@ -70,13 +71,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -C "${branch}"
           git commit -am "release: v${next}"
-          # -C plus force-with-lease makes re-runs safe after a partial failure
           git push --force-with-lease origin "${branch}"
           body=$(cat <<EOF
           Version bump \`${current}\` → \`${next}\` (${{ inputs.bump }}).
 
-          Merging this PR creates tag \`v${next}\` on the merge commit — after the
-          \`release\` environment approval — which runs GoReleaser and publishes the release.
+          Approving and merging this PR is the release approval: the merge tags
+          \`v${next}\`, builds \`rcli\` for five targets, and publishes the GitHub release.
           EOF
           )
           if pr=$(gh pr list --head "${branch}" --base main --state open --json number --jq '.[0].number // empty') && [ -n "${pr}" ]; then
